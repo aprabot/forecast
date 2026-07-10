@@ -167,27 +167,75 @@
     wherever you like — you'll pass its path via <code>--input</code>.</p>
 
     <h3>Python environment</h3>
+    <p>Create the virtual environment, activate it, then install dependencies. The
+    <em>activation</em> step differs by shell — everything after that (<code>pip
+    install</code>, <code>python forecast.py ...</code>) is identical on every OS, so the
+    rest of this doc doesn't repeat itself per-platform.</p>
+
+    <h4 style="margin:16px 0 4px; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.05em;">macOS / Linux (bash/zsh)</h4>
     <pre><code>cd forecast
 python3 -m venv .venv
-.venv/bin/pip install -e .   # or: pip install numpy pandas lightgbm jpholiday certifi</code></pre>
+source .venv/bin/activate
+pip install -e .   # or: pip install numpy pandas lightgbm jpholiday certifi</code></pre>
+
+    <h4 style="margin:16px 0 4px; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.05em;">Windows (PowerShell)</h4>
+    <pre><code>cd forecast
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .   # or: pip install numpy pandas lightgbm jpholiday certifi</code></pre>
+
+    <h4 style="margin:16px 0 4px; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.05em;">Windows (cmd.exe)</h4>
+    <pre><code>cd forecast
+py -m venv .venv
+.venv\Scripts\activate.bat
+pip install -e .</code></pre>
+
+    <p>If your prompt now shows a <code>(.venv)</code> prefix, activation worked — every
+    command below assumes you're inside this activated environment.</p>
 
     <div class="callout warn">
-      <strong>macOS only:</strong> LightGBM needs the OpenMP runtime, which isn't part of
-      the OS. If you hit <code>Library not loaded: @rpath/libomp.dylib</code>, run:
+      <strong>macOS:</strong> LightGBM needs the OpenMP runtime, which isn't part of the
+      OS. If you hit <code>Library not loaded: @rpath/libomp.dylib</code>, run:
       <pre><code>brew install libomp</code></pre>
+    </div>
+
+    <div class="callout warn">
+      <strong>Windows:</strong> the official LightGBM wheels bundle what they need, so
+      this usually works with no extra install. If you hit an
+      <code>ImportError</code> / <code>DLL load failed</code> on <code>import lightgbm</code>,
+      install the
+      <a href="https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist" target="_blank" rel="noopener">Microsoft Visual C++ Redistributable (x64)</a>
+      and retry. If <code>py -m venv</code> isn't recognized, install Python from
+      <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org</a>
+      (check "Add python.exe to PATH" during setup) rather than the Microsoft Store version.
     </div>
   </section>
 
   <section id="running">
     <h2>6. Running / testing commands</h2>
+    <p>All commands below assume the venv from <a href="#setup">Setup</a> is activated,
+    so <code>python</code> resolves to the venv's interpreter on every OS — no
+    <code>.venv/bin/</code> or <code>.venv\Scripts\</code> prefix needed.</p>
+
     <h3>Run the current best-known backtest</h3>
-    <pre><code>.venv/bin/python forecast.py \
+    <p>macOS/Linux (bash/zsh line continuation):</p>
+    <pre><code>python forecast.py \
   --input /path/to/With_Price.tsv \
   --train-end 2024-12-31 \
   --refresh-days 28 \
   --known-prices \
   --weather weather.tsv \
   --calibrate</code></pre>
+    <p>Windows (PowerShell backtick continuation) — note the Windows-style input path:</p>
+    <pre><code>python forecast.py `
+  --input C:\path\to\With_Price.tsv `
+  --train-end 2024-12-31 `
+  --refresh-days 28 `
+  --known-prices `
+  --weather weather.tsv `
+  --calibrate</code></pre>
+    <p>Or skip line continuation entirely and put it all on one line — works in any shell:</p>
+    <pre><code>python forecast.py --input With_Price.tsv --train-end 2024-12-31 --refresh-days 28 --known-prices --weather weather.tsv --calibrate</code></pre>
     <p>This trains on &le;2024-12-31 and does a <em>rolling-origin</em> backtest over all
     of 2025 (re-seeds lag features with real actuals every 28 days instead of one
     single-shot 365-day recursive run — see <a href="#glossary">glossary</a> for why that
@@ -198,9 +246,9 @@ python3 -m venv .venv
     input data or environment.</p>
 
     <h3>Then look at the breakdown</h3>
-    <pre><code>.venv/bin/python peak_wape.py            # console: peak vs non-peak vs zero-demand
-.venv/bin/python wape_levels.py          # console: WAPE at 3 aggregation grains
-.venv/bin/python generate_report.py      # writes wape_report.html (open it in a browser)</code></pre>
+    <pre><code>python peak_wape.py            # console: peak vs non-peak vs zero-demand
+python wape_levels.py          # console: WAPE at 3 aggregation grains
+python generate_report.py      # writes wape_report.html (open it in a browser)</code></pre>
     <p>All three default to reading <code>backtest_2025.tsv</code> from the repo root, so
     just run them after the backtest above with no arguments.</p>
 
