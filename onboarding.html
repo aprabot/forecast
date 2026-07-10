@@ -63,9 +63,6 @@
       <li><a href="#code-structure">Code structure</a></li>
       <li><a href="#setup">Setup</a></li>
       <li><a href="#running">Running / testing commands</a></li>
-      <li><a href="#results">Current results &amp; the open problem</a></li>
-      <li><a href="#contributing">Where to contribute next</a></li>
-      <li><a href="#gotchas">Gotchas &amp; known issues</a></li>
       <li><a href="#glossary">Glossary</a></li>
     </ol>
   </nav>
@@ -106,8 +103,7 @@
     <p>We report WAPE at three aggregation levels (overall daily total, per-SKU, and the
     native SKU&times;ZIP grain — error naturally shrinks as you aggregate, so all three
     numbers matter) and specifically segment <strong>peak vs non-peak</strong> demand,
-    because that split is where most of the current forecasting error hides. More in
-    <a href="#results">Current results</a>.</p>
+    because that split is where most of the current forecasting error hides.</p>
   </section>
 
   <section id="how-it-works">
@@ -150,7 +146,7 @@
       <tr><td class="mono">wape_levels.py</td><td>Prints WAPE at the 3 aggregation grains (day-total / SKU / SKU-ZIP) from a backtest output file.</td></tr>
       <tr><td class="mono">peak_wape.py</td><td>Segments backtest rows into PEAK / NON-PEAK / ZERO-demand (peak = actual &ge; <code>--mult</code> &times; that series' mean) and prints WAPE/bias per segment.</td></tr>
       <tr><td class="mono">generate_report.py</td><td>Same idea as <code>peak_wape.py</code> but quantile-based peaks, all 3 grains, and renders a self-contained HTML report (<code>wape_report.html</code>) instead of console output.</td></tr>
-      <tr><td class="mono">pyproject.toml / uv.lock</td><td>Dependencies. See <a href="#gotchas">Gotchas</a> — <code>uv.lock</code> is currently stale.</td></tr>
+      <tr><td class="mono">pyproject.toml / uv.lock</td><td>Dependencies. <code>uv.lock</code> was generated with plain <code>pip</code>, not <code>uv</code>, so it may be stale against <code>pyproject.toml</code> — regenerate with <code>uv lock</code> if you have <code>uv</code> installed.</td></tr>
       <tr><td class="mono">weather.tsv</td><td>Cached weather data, checked in (small, non-sensitive).</td></tr>
       <tr><td class="mono">backtest_2025.tsv</td><td>Latest backtest output (ASIN, postal_code, ship_day, actual_units, forecast_units) — regenerated each time you run a <code>--train-end</code> backtest.</td></tr>
       <tr><td class="mono">backtest_2025.meta.json</td><td>Sidecar written alongside the backtest, recording which flags produced it (mode, known_prices, calibrate, weather/price columns used) — <code>generate_report.py</code> reads this so its report describes the run that actually happened, instead of a hardcoded description.</td></tr>
@@ -220,87 +216,11 @@ python3 -m venv .venv
     </table>
   </section>
 
-  <section id="results">
-    <h2>7. Current results &amp; the open problem</h2>
-    <p>Best config so far (the command above) gets daily WAPE (SKU-ZIP) down to
-    <strong>~0.49</strong>, monthly WAPE ~0.16, with volume error near 0%. But that
-    near-zero net bias is <strong>misleading</strong> — it's a coincidental cancellation,
-    not evenly-good forecasting:</p>
-    <table>
-      <tr><th>Segment</th><th>WAPE</th><th>Bias</th><th>Notes</th></tr>
-      <tr><td>PEAK (busiest ~11% of rows)</td><td>~0.49</td><td class="tier">&minus;45 to &minus;48%</td><td>carries ~26% of all units, badly <em>under</em>-forecast</td></tr>
-      <tr><td>NON-PEAK active</td><td>~0.40&ndash;0.50</td><td>+9 to +22%</td><td>consistently <em>over</em>-forecast</td></tr>
-      <tr><td>ZERO-demand days</td><td>&mdash;</td><td>small</td><td>occasional false-positive predictions</td></tr>
-    </table>
-    <p>In plain terms: <strong>the model shaves peaks and pads troughs.</strong> This
-    under-forecast gets worse at finer grain (day &minus;12% &rarr; SKU &minus;31% &rarr;
-    SKU-ZIP &minus;45%). We tried removing anomalies/spikes and rejected it — the "spikes"
-    are real demand the model already under-predicts (71% of the worst-error rows are
-    under-forecasts, not over-forecasts), so treating them as noise would make things
-    worse, not better.</p>
-  </section>
-
-  <section id="contributing">
-    <h2>8. Where to contribute next</h2>
-    <p>Prioritized list, highest-value first — these directly attack the peak-shaving gap
-    above rather than chasing overall WAPE in a way that could hide it further:</p>
-    <h3><span class="tier">Tier 1</span> — cheap, attacks the peak under-forecast directly</h3>
-    <ol>
-      <li>Asymmetric / quantile loss (objective closer to the 0.6&ndash;0.65 quantile, so under-forecasting peaks is penalized harder than over-forecasting troughs)</li>
-      <li>Raise <code>tweedie_variance_power</code> from 1.2 &rarr; 1.4&ndash;1.6 (fatter right tail)</li>
-      <li>Shorter refresh cadence: <code>--refresh-days 7</code></li>
-    </ol>
-    <h3><span class="tier">Tier 2</span> — attacks the trough over-forecast / zero-demand false positives</h3>
-    <ol start="4">
-      <li>Two-stage hurdle model: P(ships&gt;0) &times; E[units | ships&gt;0]</li>
-      <li>Segment-specific models (global GBM for smooth/erratic series, hurdle/Croston for intermittent/lumpy ones)</li>
-      <li>Hierarchical reconciliation (MinT / bottom-up) to borrow stability from aggregates for sparse series</li>
-    </ol>
-    <h3><span class="tier">Tier 3</span> — structural / needs more data</h3>
-    <ol start="7">
-      <li>Weekly-grain forecasting (matches the actual replenishment decision cadence)</li>
-      <li>Stockout censoring (needs inventory data we don't currently have)</li>
-      <li>Time-series CV hyperparameter tuning; LightGBM+XGBoost blend</li>
-      <li>Real future promo/temperature plans in production (the backtest currently uses actuals via <code>--known-prices</code>/<code>--weather</code>, which is an upper bound on what you'd know in advance)</li>
-    </ol>
-    <div class="callout ok">
-      Before you start: re-run the best-config backtest first (see <a href="#running">above</a>)
-      and confirm you reproduce ~0.49 WAPE and the peak-shaving pattern. That's your
-      baseline to beat.
-    </div>
-  </section>
-
-  <section id="gotchas">
-    <h2>9. Gotchas &amp; known issues</h2>
-    <ul>
-      <li><strong><code>uv.lock</code> is stale.</strong> Dependencies were installed
-        with plain <code>pip</code> into <code>.venv</code>, not via <code>uv</code>, so
-        the lock file doesn't reflect the current <code>pyproject.toml</code>. If you have
-        <code>uv</code> installed, regenerate it with <code>uv lock</code>; otherwise just
-        <code>pip install</code> from <code>pyproject.toml</code> as shown above.</li>
-      <li><strong>No fixed random seed</strong> in <code>lgb_params()</code>
-        (<code>forecast.py</code>) — re-runs should be close but aren't guaranteed
-        bit-identical.</li>
-      <li><strong>This repo is public.</strong> <code>weather.tsv</code> and
-        <code>backtest_2025.tsv</code> are checked in (non-sensitive / derived), but the
-        raw <code>With_Price.tsv</code> deliberately is not. Don't add it or anything
-        else with real pricing/customer data to a commit.</li>
-      <li><strong>Holiday cache is hardcoded to 2021&ndash;2027</strong>
-        (<code>_HOLIDAY_CACHE</code> in <code>forecast.py</code>) — forecasting dates
-        beyond 2027 will silently get <code>is_holiday=0</code> instead of erroring.
-        Worth fixing if long-horizon forward forecasts become a priority.</li>
-      <li><strong>Different "known" grades of realism:</strong> <code>--known-prices</code>
-        and <code>--weather</code> feed the backtest actual future prices/weather, which
-        is a fair way to isolate model quality but is optimistic vs. real production
-        (see Tier 3, item 10 above).</li>
-    </ul>
-  </section>
-
   <section id="glossary">
-    <h2>10. Glossary</h2>
+    <h2>7. Glossary</h2>
     <table>
       <tr><th class="mono">WAPE</th><td>Weighted Absolute Percentage Error = &Sigma;|actual&minus;forecast| / &Sigma;actual. The project's primary accuracy metric; lower is better.</td></tr>
-      <tr><th class="mono">Bias</th><td>(&Sigma;forecast&minus;&Sigma;actual) / &Sigma;actual. Positive = over-forecasting on net, negative = under-forecasting. A bias near 0 does <em>not</em> mean the forecast is accurate everywhere — see <a href="#results">Current results</a>.</td></tr>
+      <tr><th class="mono">Bias</th><td>(&Sigma;forecast&minus;&Sigma;actual) / &Sigma;actual. Positive = over-forecasting on net, negative = under-forecasting. A bias near 0 does <em>not</em> necessarily mean the forecast is accurate everywhere — it can hide offsetting over- and under-forecasts in different segments.</td></tr>
       <tr><th class="mono">Tweedie loss</th><td>A loss function for non-negative, zero-inflated targets (a mix of a point mass at 0 and a continuous positive distribution) — a natural fit for intermittent shipment counts.</td></tr>
       <tr><th class="mono">Recursive forecast</th><td>Multi-step forecasting where each predicted day is fed back in as if it were real, so it can seed the lag features of the following days.</td></tr>
       <tr><th class="mono">Rolling-origin backtest</th><td>Instead of one long recursive run over the whole test period (which compounds error), re-seed the model's lag features with real actuals every N days and forecast N days at a time — closer to how the model would actually be operated.</td></tr>
@@ -310,8 +230,7 @@ python3 -m venv .venv
     </table>
   </section>
 
-  <p class="foot">Questions? Ping whoever sent you this repo. Good luck, and check
-    <a href="#results">section 7</a> before you spend time on anything WAPE-related — it'll save you from re-discovering the peak-shaving problem the hard way.
+  <p class="foot">Questions? Ping whoever sent you this repo. Good luck!
     <br><span class="backtotop"><a href="#top">&uarr; back to top</a></span>
   </p>
 </div></body></html>
