@@ -184,6 +184,21 @@ py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .   # or: pip install numpy pandas lightgbm jpholiday certifi</code></pre>
 
+    <div class="callout warn">
+      <strong>Windows:</strong> if <code>Activate.ps1</code> fails with a message like
+      <code>cannot be loaded because running scripts is disabled on this system</code>,
+      that's PowerShell's default execution policy, not a problem with this repo. Fix it
+      one of these ways:
+      <pre><code># A: allow local scripts for your user account (persists across sessions)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# B: allow it for just this PowerShell session (no persistent change)
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process</code></pre>
+      then re-run <code>.venv\Scripts\Activate.ps1</code>. Or skip PowerShell's policy
+      entirely by using <strong>cmd.exe</strong> instead — <code>activate.bat</code>
+      below isn't a PowerShell script and isn't affected by this setting.
+    </div>
+
     <h4 style="margin:16px 0 4px; color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.05em;">Windows (cmd.exe)</h4>
     <pre><code>cd forecast
 py -m venv .venv
