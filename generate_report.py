@@ -117,6 +117,10 @@ def main():
     ap.add_argument("--top-asins", type=int, default=None,
                     help="Limit the report to the N ASINs with the highest total actual "
                          "units (default: all ASINs)")
+    ap.add_argument("--top-zips", type=int, default=None,
+                    help="Limit the report to the N postal codes with the highest total "
+                         "actual units (default: all postal codes). Combinable with "
+                         "--top-asins.")
     args = ap.parse_args()
     q = args.peak_quantile
     pct = f"{(1-q)*100:.0f}%"
@@ -130,6 +134,14 @@ def main():
         df = df[df["ASIN"].isin(top_asins)]
         print(f"[filter] top {len(top_asins)} ASINs by actual units "
               f"({len(df):,} rows, {df['ASIN'].nunique()} ASINs)")
+
+    top_zips = None
+    if args.top_zips:
+        totals = df.groupby("postal_code")["actual_units"].sum().sort_values(ascending=False)
+        top_zips = totals.head(args.top_zips).index.tolist()
+        df = df[df["postal_code"].isin(top_zips)]
+        print(f"[filter] top {len(top_zips)} postal codes by actual units "
+              f"({len(df):,} rows, {df['postal_code'].nunique()} postal codes)")
 
     d0, d1 = df["ship_day"].min().date(), df["ship_day"].max().date()
     tot_a, tot_f = df["actual_units"].sum(), df["forecast_units"].sum()
@@ -153,10 +165,18 @@ def main():
     else:
         method_desc = "methodology unknown (no .meta.json sidecar found next to the input)"
 
-    scope_desc = f" &middot; top {len(top_asins)} ASINs by units" if top_asins else ""
+    scope_bits = []
+    if top_asins:
+        scope_bits.append(f"top {len(top_asins)} ASINs by units")
+    if top_zips:
+        scope_bits.append(f"top {len(top_zips)} postal codes by units")
+    scope_desc = f" &middot; {', '.join(scope_bits)}" if scope_bits else ""
     day_scope = (f"the top {len(top_asins)} ASINs (by units)" if top_asins
                  else "every ASIN")
-    top_flag = f" --top-asins {len(top_asins)}" if top_asins else ""
+    zip_scope = (f"the top {len(top_zips)} postal codes (by units)" if top_zips
+                 else "all postal codes")
+    top_flag = ((f" --top-asins {len(top_asins)}" if top_asins else "")
+                + (f" --top-zips {len(top_zips)}" if top_zips else ""))
 
     # Grain 1: Day level (total across all SKU x ZIP).
     day = df.groupby("ship_day", as_index=False).agg(
@@ -176,12 +196,12 @@ def main():
     sections = (
         grain_section(
             "1. Day level &mdash; total demand across all SKU&times;ZIP",
-            f"Total shipped units per day, summed across {day_scope} and postal code "
+            f"Total shipped units per day, summed across {day_scope} and {zip_scope} "
             f"(one row per day). Peak = the busiest {pct} of days.",
             day, q)
         + grain_section(
             "2. Day-SKU level &mdash; per ASIN, across all ZIPs",
-            "Units per ASIN per day, summed across postal codes. "
+            f"Units per ASIN per day, summed across {zip_scope}. "
             f"Peak = the busiest {pct} of days for each ASIN.",
             sku, q)
         + grain_section(

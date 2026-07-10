@@ -59,7 +59,7 @@
   
     <section>
       <h2>1. Day level &mdash; total demand across all SKU&times;ZIP</h2>
-      <p class="desc">Total shipped units per day, summed across every ASIN and postal code (one row per day). Peak = the busiest 10% of days.</p>
+      <p class="desc">Total shipped units per day, summed across every ASIN and all postal codes (one row per day). Peak = the busiest 10% of days.</p>
       <table>
         <thead>
           <tr><th>Segment</th><th>WAPE</th><th>MAE</th><th>Bias</th>
@@ -70,7 +70,7 @@
     </section>
     <section>
       <h2>2. Day-SKU level &mdash; per ASIN, across all ZIPs</h2>
-      <p class="desc">Units per ASIN per day, summed across postal codes. Peak = the busiest 10% of days for each ASIN.</p>
+      <p class="desc">Units per ASIN per day, summed across all postal codes. Peak = the busiest 10% of days for each ASIN.</p>
       <table>
         <thead>
           <tr><th>Segment</th><th>WAPE</th><th>MAE</th><th>Bias</th>
@@ -95,6 +95,6 @@
      Bias = (&Sigma;forecast&minus;&Sigma;actual)/&Sigma;actual; positive = over-forecast.
      Peak/non-peak is a partition of all rows at each grain (non-peak includes
      zero-demand days at the SKU and SKU-ZIP grains).</p>
-  <p class="foot">Generated 2026-07-10 16:54 from <code>backtest_2025.tsv</code>
+  <p class="foot">Generated 2026-07-10 16:58 from <code>backtest_2025.tsv</code>
      &middot; reproduce with <code>python generate_report.py --peak-quantile 0.9</code></p>
 </div></body></html>

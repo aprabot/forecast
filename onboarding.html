@@ -264,12 +264,15 @@ pip install -e .</code></pre>
     <pre><code>python peak_wape.py            # console: peak vs non-peak vs zero-demand
 python wape_levels.py          # console: WAPE at 3 aggregation grains
 python generate_report.py      # writes wape_report.html (open it in a browser)
-python generate_report.py --top-asins 10   # same report, scoped to the 10 highest-volume ASINs</code></pre>
+python generate_report.py --top-asins 10   # same report, scoped to the 10 highest-volume ASINs
+python generate_report.py --top-zips 10    # same report, scoped to the 10 highest-volume postal codes
+python generate_report.py --top-asins 10 --top-zips 10   # combine both filters</code></pre>
     <p>All three default to reading <code>backtest_2025.tsv</code> from the repo root, so
     just run them after the backtest above with no arguments.
-    <code>generate_report.py --top-asins N</code> filters to the N ASINs with the highest
-    total actual units before computing every grain — useful for a quick look at your
-    biggest sellers without the long tail diluting the numbers.</p>
+    <code>--top-asins N</code> / <code>--top-zips N</code> filter to the N ASINs /
+    postal codes with the highest total actual units before computing every grain —
+    useful for a quick look at your biggest sellers or markets without the long tail
+    diluting the numbers. They can be combined.</p>
 
     <h3>Other useful flags on forecast.py</h3>
     <table>
