@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forecast — Onboarding</title>
+<style>
+  :root { --bg:#0f1320; --card:#1a2032; --ink:#e8ecf5; --muted:#9aa6c2;
+          --line:#2a3147; --accent:#5b8cff; --peak:#ff8a5b; --ok:#46d29a; --warn:#ffcf5c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:920px; margin:0 auto; padding:40px 24px 80px; }
+  h1 { font-size:30px; margin:0 0 6px; }
+  h2 { font-size:21px; margin:44px 0 6px; color:var(--ink); border-bottom:1px solid var(--line); padding-bottom:8px;}
+  h3 { font-size:16px; margin:22px 0 8px; color:var(--accent); }
+  .sub { color:var(--muted); margin:0 0 28px; font-size:16px; }
+  p { margin:8px 0; }
+  a { color:var(--accent); }
+  .badge { display:inline-block; background:rgba(91,140,255,.15); color:var(--accent);
+           border:1px solid rgba(91,140,255,.35); border-radius:999px; padding:2px 10px;
+           font-size:12px; margin-right:6px; }
+  nav.toc { background:var(--card); border:1px solid var(--line); border-radius:14px;
+            padding:18px 22px; margin:24px 0 8px; }
+  nav.toc div.title { color:var(--muted); font-size:12px; text-transform:uppercase;
+                       letter-spacing:.06em; margin-bottom:10px; }
+  nav.toc ol { margin:0; padding-left:20px; columns:2; column-gap:28px; }
+  nav.toc li { margin-bottom:6px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:14px;
+            padding:24px 26px; margin:0 0 20px; }
+  code { background:#0a0d18; padding:1px 6px; border-radius:5px; font-size:13px; }
+  pre { background:#0a0d18; border:1px solid var(--line); border-radius:10px;
+        padding:14px 16px; overflow-x:auto; }
+  pre code { background:none; padding:0; }
+  table { width:100%; border-collapse:collapse; margin:10px 0; }
+  th,td { padding:9px 10px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top;}
+  th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+  td.mono, th.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+  .callout { border-left:3px solid var(--accent); background:rgba(91,140,255,.08);
+             border-radius:0 10px 10px 0; padding:10px 16px; margin:14px 0; }
+  .callout.warn { border-left-color:var(--warn); background:rgba(255,207,92,.08); }
+  .callout.ok { border-left-color:var(--ok); background:rgba(70,210,154,.08); }
+  ul, ol { padding-left:22px; }
+  li { margin:4px 0; }
+  .tier { font-weight:700; color:var(--peak); }
+  .foot { color:var(--muted); font-size:12.5px; margin-top:40px; text-align:center; }
+  .backtotop { font-size:12px; }
+</style></head>
+<body><div class="wrap">
+
+  <h1>Forecast — Onboarding</h1>
+  <p class="sub">Everything you need to clone this repo, get it running, and start contributing.</p>
+  <div>
+    <span class="badge">Python 3.9+</span>
+    <span class="badge">LightGBM</span>
+    <span class="badge">Demand forecasting</span>
+  </div>
+
+  <nav class="toc">
+    <div class="title">Contents</div>
+    <ol>
+      <li><a href="#what-is-forecasting">What is demand forecasting?</a></li>
+      <li><a href="#what-were-doing">What we're trying to do</a></li>
+      <li><a href="#how-it-works">How the pipeline works</a></li>
+      <li><a href="#code-structure">Code structure</a></li>
+      <li><a href="#setup">Setup</a></li>
+      <li><a href="#running">Running / testing commands</a></li>
+      <li><a href="#results">Current results &amp; the open problem</a></li>
+      <li><a href="#contributing">Where to contribute next</a></li>
+      <li><a href="#gotchas">Gotchas &amp; known issues</a></li>
+      <li><a href="#glossary">Glossary</a></li>
+    </ol>
+  </nav>
+
+  <section id="what-is-forecasting">
+    <h2>1. What is demand forecasting?</h2>
+    <p>Demand forecasting means predicting how many units of a product will sell (here:
+    <em>ship</em>) in future time periods, using historical sales patterns plus anything
+    else that plausibly drives demand — day of week, season, holidays, weather, price,
+    promotions. A forecast is only useful if you can also measure how wrong it is, which
+    is why this whole project is organized around one metric: <strong>WAPE</strong>
+    (Weighted Absolute Percentage Error) — see the <a href="#glossary">glossary</a> for the
+    formula. Lower WAPE = more accurate forecast.</p>
+    <p>Two things make this problem harder than "fit a line through history":</p>
+    <ul>
+      <li><strong>Intermittency</strong> — many (product, location) combinations sell 0
+        units on most days and a handful of units on others. A model that's great at
+        forecasting a steadily-selling product can do badly here.</li>
+      <li><strong>Multi-step / recursive forecasting</strong> — to predict 28 days ahead,
+        the model's day-8 prediction depends on features built from its own day-1..7
+        predictions (since the real actuals for those days don't exist yet). Errors can
+        compound the further out you forecast.</li>
+    </ul>
+  </section>
+
+  <section id="what-were-doing">
+    <h2>2. What we're trying to do</h2>
+    <p>Forecast <code>shipped_units</code> at the <strong>ASIN &times; postal_code &times; day</strong>
+    grain for a Japanese bottled-water business — i.e. for each product (ASIN) and each
+    delivery postal code, how many units ship on each future day.</p>
+    <table>
+      <tr><th>Scope</th><td>20 ASINs &times; 19 postal codes &rarr; 217 active series (product/location pairs with any sales history)</td></tr>
+      <tr><th>History</th><td>2023-01-01 &rarr; 2025-12-31, 312,705 shipment-level rows, 771,510 total units</td></tr>
+      <tr><th>Backtest design</th><td>Train on 2023&ndash;2024, test on all of 2025 (a genuine out-of-sample holdout)</td></tr>
+      <tr><th>Series shape</th><td>Mixed: Syntetos&ndash;Boylan classification found 66 smooth, 52 erratic, 54 lumpy, 45 intermittent series</td></tr>
+      <tr><th>Known signal</th><td>lag-1 autocorrelation 0.78, lag-7 0.63 (weekly cycle), summer demand peak, ~25%/yr upward trend</td></tr>
+    </table>
+    <p>We report WAPE at three aggregation levels (overall daily total, per-SKU, and the
+    native SKU&times;ZIP grain — error naturally shrinks as you aggregate, so all three
+    numbers matter) and specifically segment <strong>peak vs non-peak</strong> demand,
+    because that split is where most of the current forecasting error hides. More in
+    <a href="#results">Current results</a>.</p>
+  </section>
+
+  <section id="how-it-works">
+    <h2>3. How the pipeline works</h2>
+    <p>Everything happens in <code>forecast.py</code>, in six stages:</p>
+    <ol>
+      <li><strong>Load &amp; aggregate</strong> — read the shipment-level TSV, sum to one
+        row per (ASIN, postal_code, day).</li>
+      <li><strong>Densify</strong> — reindex every series onto a full daily calendar from
+        its first sale onward, zero-filling no-ship days. Without this, lag/rolling
+        features would be calendar-wrong for intermittent series.</li>
+      <li><strong>Feature engineering</strong> — lags (1..28 days, plus 364/365/371-day
+        "same time last year" lags), rolling mean/std/max/active-rate over 7/14/28-day
+        windows, calendar features, Japanese holidays (via <code>jpholiday</code>),
+        price/discount, weather, and hand-built "peak anticipation" interaction features
+        (promo &times; weekend, promo &times; heat, etc.).</li>
+      <li><strong>Train</strong> — a single <em>global</em> LightGBM regressor (one model
+        across all 217 series, not one model per series) with a Tweedie loss, which
+        natively handles non-negative, zero-inflated counts.</li>
+      <li><strong>Backtest</strong> — forecast the holdout period recursively (each day's
+        prediction feeds the next day's lag features) and score against two baselines:
+        same-day-last-year, and Croston/TSB (a classic intermittent-demand method).</li>
+      <li><strong>Forward forecast</strong> (optional) — refit on all available data and
+        roll forward beyond the end of history.</li>
+    </ol>
+    <div class="callout">
+      <strong>Why one global model instead of one per series?</strong> With 217 series,
+      many of them sparse, a global model shares statistical strength across series (a
+      lumpy series still benefits from what the model learned about seasonality/holidays
+      from the dense ones) — this was an explicit design decision, not an oversight.
+    </div>
+  </section>
+
+  <section id="code-structure">
+    <h2>4. Code structure</h2>
+    <table>
+      <tr><th class="mono">File</th><th>Purpose</th></tr>
+      <tr><td class="mono">forecast.py</td><td>The pipeline described above. All CLI flags live here (see <code>--help</code>).</td></tr>
+      <tr><td class="mono">fetch_weather.py</td><td>One-time/occasional script: geocodes postal codes (HeartRails API) and pulls historical daily weather (Open-Meteo, no key needed) &rarr; <code>weather.tsv</code>. Already run; output is checked in.</td></tr>
+      <tr><td class="mono">wape_levels.py</td><td>Prints WAPE at the 3 aggregation grains (day-total / SKU / SKU-ZIP) from a backtest output file.</td></tr>
+      <tr><td class="mono">peak_wape.py</td><td>Segments backtest rows into PEAK / NON-PEAK / ZERO-demand (peak = actual &ge; <code>--mult</code> &times; that series' mean) and prints WAPE/bias per segment.</td></tr>
+      <tr><td class="mono">generate_report.py</td><td>Same idea as <code>peak_wape.py</code> but quantile-based peaks, all 3 grains, and renders a self-contained HTML report (<code>wape_report.html</code>) instead of console output.</td></tr>
+      <tr><td class="mono">pyproject.toml / uv.lock</td><td>Dependencies. See <a href="#gotchas">Gotchas</a> — <code>uv.lock</code> is currently stale.</td></tr>
+      <tr><td class="mono">weather.tsv</td><td>Cached weather data, checked in (small, non-sensitive).</td></tr>
+      <tr><td class="mono">backtest_2025.tsv</td><td>Latest backtest output (ASIN, postal_code, ship_day, actual_units, forecast_units) — regenerated each time you run a <code>--train-end</code> backtest.</td></tr>
+      <tr><td class="mono">backtest_2025.meta.json</td><td>Sidecar written alongside the backtest, recording which flags produced it (mode, known_prices, calibrate, weather/price columns used) — <code>generate_report.py</code> reads this so its report describes the run that actually happened, instead of a hardcoded description.</td></tr>
+      <tr><td class="mono">wape_report.html</td><td>Generated output of <code>generate_report.py</code> — not something you hand-edit.</td></tr>
+    </table>
+    <p><strong>Not in this repo:</strong> the raw input data (<code>With_Price.tsv</code>) —
+    see <a href="#setup">Setup</a> below for why and how to get it.</p>
+  </section>
+
+  <section id="setup">
+    <h2>5. Setup</h2>
+    <h3>Get the raw data</h3>
+    <p><code>With_Price.tsv</code> is <strong>not committed to this repo</strong> — it's
+    real shipment/pricing/discount data and this repo is public on GitHub, so it's kept
+    out deliberately. Ask whoever onboarded you for the file (columns: <code>ship_day,
+    asin, warehouse_id, subcategory_code, subcategory_description, postal_code,
+    zipcode_category, shipped_units, avg_our_price, avg_discount_amt</code>) and place it
+    wherever you like — you'll pass its path via <code>--input</code>.</p>
+
+    <h3>Python environment</h3>
+    <pre><code>cd forecast
+python3 -m venv .venv
+.venv/bin/pip install -e .   # or: pip install numpy pandas lightgbm jpholiday certifi</code></pre>
+
+    <div class="callout warn">
+      <strong>macOS only:</strong> LightGBM needs the OpenMP runtime, which isn't part of
+      the OS. If you hit <code>Library not loaded: @rpath/libomp.dylib</code>, run:
+      <pre><code>brew install libomp</code></pre>
+    </div>
+  </section>
+
+  <section id="running">
+    <h2>6. Running / testing commands</h2>
+    <h3>Run the current best-known backtest</h3>
+    <pre><code>.venv/bin/python forecast.py \
+  --input /path/to/With_Price.tsv \
+  --train-end 2024-12-31 \
+  --refresh-days 28 \
+  --known-prices \
+  --weather weather.tsv \
+  --calibrate</code></pre>
+    <p>This trains on &le;2024-12-31 and does a <em>rolling-origin</em> backtest over all
+    of 2025 (re-seeds lag features with real actuals every 28 days instead of one
+    single-shot 365-day recursive run — see <a href="#glossary">glossary</a> for why that
+    matters). It writes <code>backtest_2025.tsv</code> + <code>backtest_2025.meta.json</code>
+    and prints a metric table. Sanity check: you should land close to
+    <strong>daily WAPE &asymp; 0.49</strong>, monthly WAPE &asymp; 0.16, volume error
+    within a couple points of 0% — if you're wildly off, something's different about your
+    input data or environment.</p>
+
+    <h3>Then look at the breakdown</h3>
+    <pre><code>.venv/bin/python peak_wape.py            # console: peak vs non-peak vs zero-demand
+.venv/bin/python wape_levels.py          # console: WAPE at 3 aggregation grains
+.venv/bin/python generate_report.py      # writes wape_report.html (open it in a browser)</code></pre>
+    <p>All three default to reading <code>backtest_2025.tsv</code> from the repo root, so
+    just run them after the backtest above with no arguments.</p>
+
+    <h3>Other useful flags on forecast.py</h3>
+    <table>
+      <tr><th class="mono">Flag</th><th>What it does</th></tr>
+      <tr><td class="mono">--refresh-days N</td><td>Rolling-origin cadence. <code>0</code> = single-shot recursive for the whole horizon (compounds error badly over a year — don't use for long backtests).</td></tr>
+      <tr><td class="mono">--known-prices</td><td>Feed the test period's <em>actual</em> prices as a known promo calendar (otherwise price is carried forward flat). This is an upper bound — in real production you'd only know planned/future prices.</td></tr>
+      <tr><td class="mono">--weather PATH</td><td>Add weather as a known exogenous signal.</td></tr>
+      <tr><td class="mono">--calibrate</td><td>Leakage-free rolling bias correction (scales each refresh block by the actual/forecast ratio of already-realized blocks). Keep this on — it consistently helps.</td></tr>
+      <tr><td class="mono">--weights / --monotone</td><td>Opt-in volume sample-weighting / monotone price constraints. Both were tried and <strong>rejected</strong> — they regressed WAPE on this data. Off by default; don't turn them back on without new evidence.</td></tr>
+      <tr><td class="mono">--forecast-future</td><td>Also refit on all data and forecast <code>--horizon</code> days beyond the end of history.</td></tr>
+    </table>
+  </section>
+
+  <section id="results">
+    <h2>7. Current results &amp; the open problem</h2>
+    <p>Best config so far (the command above) gets daily WAPE (SKU-ZIP) down to
+    <strong>~0.49</strong>, monthly WAPE ~0.16, with volume error near 0%. But that
+    near-zero net bias is <strong>misleading</strong> — it's a coincidental cancellation,
+    not evenly-good forecasting:</p>
+    <table>
+      <tr><th>Segment</th><th>WAPE</th><th>Bias</th><th>Notes</th></tr>
+      <tr><td>PEAK (busiest ~11% of rows)</td><td>~0.49</td><td class="tier">&minus;45 to &minus;48%</td><td>carries ~26% of all units, badly <em>under</em>-forecast</td></tr>
+      <tr><td>NON-PEAK active</td><td>~0.40&ndash;0.50</td><td>+9 to +22%</td><td>consistently <em>over</em>-forecast</td></tr>
+      <tr><td>ZERO-demand days</td><td>&mdash;</td><td>small</td><td>occasional false-positive predictions</td></tr>
+    </table>
+    <p>In plain terms: <strong>the model shaves peaks and pads troughs.</strong> This
+    under-forecast gets worse at finer grain (day &minus;12% &rarr; SKU &minus;31% &rarr;
+    SKU-ZIP &minus;45%). We tried removing anomalies/spikes and rejected it — the "spikes"
+    are real demand the model already under-predicts (71% of the worst-error rows are
+    under-forecasts, not over-forecasts), so treating them as noise would make things
+    worse, not better.</p>
+  </section>
+
+  <section id="contributing">
+    <h2>8. Where to contribute next</h2>
+    <p>Prioritized list, highest-value first — these directly attack the peak-shaving gap
+    above rather than chasing overall WAPE in a way that could hide it further:</p>
+    <h3><span class="tier">Tier 1</span> — cheap, attacks the peak under-forecast directly</h3>
+    <ol>
+      <li>Asymmetric / quantile loss (objective closer to the 0.6&ndash;0.65 quantile, so under-forecasting peaks is penalized harder than over-forecasting troughs)</li>
+      <li>Raise <code>tweedie_variance_power</code> from 1.2 &rarr; 1.4&ndash;1.6 (fatter right tail)</li>
+      <li>Shorter refresh cadence: <code>--refresh-days 7</code></li>
+    </ol>
+    <h3><span class="tier">Tier 2</span> — attacks the trough over-forecast / zero-demand false positives</h3>
+    <ol start="4">
+      <li>Two-stage hurdle model: P(ships&gt;0) &times; E[units | ships&gt;0]</li>
+      <li>Segment-specific models (global GBM for smooth/erratic series, hurdle/Croston for intermittent/lumpy ones)</li>
+      <li>Hierarchical reconciliation (MinT / bottom-up) to borrow stability from aggregates for sparse series</li>
+    </ol>
+    <h3><span class="tier">Tier 3</span> — structural / needs more data</h3>
+    <ol start="7">
+      <li>Weekly-grain forecasting (matches the actual replenishment decision cadence)</li>
+      <li>Stockout censoring (needs inventory data we don't currently have)</li>
+      <li>Time-series CV hyperparameter tuning; LightGBM+XGBoost blend</li>
+      <li>Real future promo/temperature plans in production (the backtest currently uses actuals via <code>--known-prices</code>/<code>--weather</code>, which is an upper bound on what you'd know in advance)</li>
+    </ol>
+    <div class="callout ok">
+      Before you start: re-run the best-config backtest first (see <a href="#running">above</a>)
+      and confirm you reproduce ~0.49 WAPE and the peak-shaving pattern. That's your
+      baseline to beat.
+    </div>
+  </section>
+
+  <section id="gotchas">
+    <h2>9. Gotchas &amp; known issues</h2>
+    <ul>
+      <li><strong><code>uv.lock</code> is stale.</strong> Dependencies were installed
+        with plain <code>pip</code> into <code>.venv</code>, not via <code>uv</code>, so
+        the lock file doesn't reflect the current <code>pyproject.toml</code>. If you have
+        <code>uv</code> installed, regenerate it with <code>uv lock</code>; otherwise just
+        <code>pip install</code> from <code>pyproject.toml</code> as shown above.</li>
+      <li><strong>No fixed random seed</strong> in <code>lgb_params()</code>
+        (<code>forecast.py</code>) — re-runs should be close but aren't guaranteed
+        bit-identical.</li>
+      <li><strong>This repo is public.</strong> <code>weather.tsv</code> and
+        <code>backtest_2025.tsv</code> are checked in (non-sensitive / derived), but the
+        raw <code>With_Price.tsv</code> deliberately is not. Don't add it or anything
+        else with real pricing/customer data to a commit.</li>
+      <li><strong>Holiday cache is hardcoded to 2021&ndash;2027</strong>
+        (<code>_HOLIDAY_CACHE</code> in <code>forecast.py</code>) — forecasting dates
+        beyond 2027 will silently get <code>is_holiday=0</code> instead of erroring.
+        Worth fixing if long-horizon forward forecasts become a priority.</li>
+      <li><strong>Different "known" grades of realism:</strong> <code>--known-prices</code>
+        and <code>--weather</code> feed the backtest actual future prices/weather, which
+        is a fair way to isolate model quality but is optimistic vs. real production
+        (see Tier 3, item 10 above).</li>
+    </ul>
+  </section>
+
+  <section id="glossary">
+    <h2>10. Glossary</h2>
+    <table>
+      <tr><th class="mono">WAPE</th><td>Weighted Absolute Percentage Error = &Sigma;|actual&minus;forecast| / &Sigma;actual. The project's primary accuracy metric; lower is better.</td></tr>
+      <tr><th class="mono">Bias</th><td>(&Sigma;forecast&minus;&Sigma;actual) / &Sigma;actual. Positive = over-forecasting on net, negative = under-forecasting. A bias near 0 does <em>not</em> mean the forecast is accurate everywhere — see <a href="#results">Current results</a>.</td></tr>
+      <tr><th class="mono">Tweedie loss</th><td>A loss function for non-negative, zero-inflated targets (a mix of a point mass at 0 and a continuous positive distribution) — a natural fit for intermittent shipment counts.</td></tr>
+      <tr><th class="mono">Recursive forecast</th><td>Multi-step forecasting where each predicted day is fed back in as if it were real, so it can seed the lag features of the following days.</td></tr>
+      <tr><th class="mono">Rolling-origin backtest</th><td>Instead of one long recursive run over the whole test period (which compounds error), re-seed the model's lag features with real actuals every N days and forecast N days at a time — closer to how the model would actually be operated.</td></tr>
+      <tr><th class="mono">Croston / TSB</th><td>Classic intermittent-demand forecasting method (estimates demand size and probability of a non-zero day separately) — used here as a baseline, not the main model.</td></tr>
+      <tr><th class="mono">Syntetos&ndash;Boylan classification</th><td>A standard way to categorize demand series (smooth / erratic / lumpy / intermittent) based on how often and how variably they sell.</td></tr>
+      <tr><th class="mono">ASIN</th><td>Product identifier (Amazon Standard Identification Number convention, used here as a generic per-SKU key).</td></tr>
+    </table>
+  </section>
+
+  <p class="foot">Questions? Ping whoever sent you this repo. Good luck, and check
+    <a href="#results">section 7</a> before you spend time on anything WAPE-related — it'll save you from re-discovering the peak-shaving problem the hard way.
+    <br><span class="backtotop"><a href="#top">&uarr; back to top</a></span>
+  </p>
+</div></body></html>
