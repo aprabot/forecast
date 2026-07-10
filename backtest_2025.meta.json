@@ -1,0 +1,26 @@
+{
+  "model": "LightGBM (global, tweedie)",
+  "train_end": "2024-12-31",
+  "test_start": "2025-01-01",
+  "test_end": "2025-12-31",
+  "mode": "rolling-origin (refresh 28d)",
+  "refresh_days": 28,
+  "known_prices": true,
+  "calibrate": true,
+  "price_cols": [
+    "avg_our_price",
+    "avg_discount_amt"
+  ],
+  "weather_cols": [
+    "temp_mean",
+    "temp_max",
+    "temp_min",
+    "precip_mm",
+    "is_hot",
+    "is_cold",
+    "temp_max_roll7",
+    "temp_max_lag1",
+    "heatwave",
+    "temp_range"
+  ]
+}
