@@ -263,9 +263,13 @@ pip install -e .</code></pre>
     <h3>Then look at the breakdown</h3>
     <pre><code>python peak_wape.py            # console: peak vs non-peak vs zero-demand
 python wape_levels.py          # console: WAPE at 3 aggregation grains
-python generate_report.py      # writes wape_report.html (open it in a browser)</code></pre>
+python generate_report.py      # writes wape_report.html (open it in a browser)
+python generate_report.py --top-asins 10   # same report, scoped to the 10 highest-volume ASINs</code></pre>
     <p>All three default to reading <code>backtest_2025.tsv</code> from the repo root, so
-    just run them after the backtest above with no arguments.</p>
+    just run them after the backtest above with no arguments.
+    <code>generate_report.py --top-asins N</code> filters to the N ASINs with the highest
+    total actual units before computing every grain — useful for a quick look at your
+    biggest sellers without the long tail diluting the numbers.</p>
 
     <h3>Other useful flags on forecast.py</h3>
     <table>

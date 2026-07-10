@@ -114,11 +114,23 @@ def main():
     ap.add_argument("--output", default=os.path.join(HERE, "wape_report.html"))
     ap.add_argument("--peak-quantile", type=float, default=0.90,
                     help="Peak = actual in the top (1-q) of the group (default 0.90 = busiest decile)")
+    ap.add_argument("--top-asins", type=int, default=None,
+                    help="Limit the report to the N ASINs with the highest total actual "
+                         "units (default: all ASINs)")
     args = ap.parse_args()
     q = args.peak_quantile
     pct = f"{(1-q)*100:.0f}%"
 
     df = pd.read_csv(args.input, sep="\t", parse_dates=["ship_day"])
+
+    top_asins = None
+    if args.top_asins:
+        totals = df.groupby("ASIN")["actual_units"].sum().sort_values(ascending=False)
+        top_asins = totals.head(args.top_asins).index.tolist()
+        df = df[df["ASIN"].isin(top_asins)]
+        print(f"[filter] top {len(top_asins)} ASINs by actual units "
+              f"({len(df):,} rows, {df['ASIN'].nunique()} ASINs)")
+
     d0, d1 = df["ship_day"].min().date(), df["ship_day"].max().date()
     tot_a, tot_f = df["actual_units"].sum(), df["forecast_units"].sum()
     overall_wape = wape(df["actual_units"], df["forecast_units"])
@@ -141,6 +153,11 @@ def main():
     else:
         method_desc = "methodology unknown (no .meta.json sidecar found next to the input)"
 
+    scope_desc = f" &middot; top {len(top_asins)} ASINs by units" if top_asins else ""
+    day_scope = (f"the top {len(top_asins)} ASINs (by units)" if top_asins
+                 else "every ASIN")
+    top_flag = f" --top-asins {len(top_asins)}" if top_asins else ""
+
     # Grain 1: Day level (total across all SKU x ZIP).
     day = df.groupby("ship_day", as_index=False).agg(
         actual_units=("actual_units", "sum"),
@@ -159,7 +176,7 @@ def main():
     sections = (
         grain_section(
             "1. Day level &mdash; total demand across all SKU&times;ZIP",
-            "Total shipped units per day, summed across every ASIN and postal code "
+            f"Total shipped units per day, summed across {day_scope} and postal code "
             f"(one row per day). Peak = the busiest {pct} of days.",
             day, q)
         + grain_section(
@@ -217,12 +234,14 @@ def main():
 </style></head>
 <body><div class="wrap">
   <h1>Forecast WAPE Report &mdash; Peak vs Non-Peak</h1>
-  <p class="sub">Backtest {d0} &rarr; {d1} &middot; {method_desc}.
+  <p class="sub">Backtest {d0} &rarr; {d1} &middot; {method_desc}{scope_desc}.
      Peak threshold = busiest {pct} of each group.</p>
 
   <div class="kpis">
     <div class="kpi"><div class="label">Overall WAPE (SKU-ZIP)</div>
         <div class="value">{overall_wape:.3f}</div></div>
+    <div class="kpi"><div class="label">ASINs</div>
+        <div class="value">{df['ASIN'].nunique():,}</div></div>
     <div class="kpi"><div class="label">Actual units</div>
         <div class="value">{tot_a:,.0f}</div></div>
     <div class="kpi"><div class="label">Forecast units</div>
@@ -238,7 +257,7 @@ def main():
      Peak/non-peak is a partition of all rows at each grain (non-peak includes
      zero-demand days at the SKU and SKU-ZIP grains).</p>
   <p class="foot">Generated {generated} from <code>{args.input.split("/")[-1]}</code>
-     &middot; reproduce with <code>python generate_report.py --peak-quantile {q}</code></p>
+     &middot; reproduce with <code>python generate_report.py --peak-quantile {q}{top_flag}</code></p>
 </div></body></html>"""
 
     with open(args.output, "w") as fh:
