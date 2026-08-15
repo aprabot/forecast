@@ -698,15 +698,23 @@ def backtest_trailing(df, feats, backtest_days):
 # --------------------------------------------------------------------------- #
 # 6. Recursive forward forecast (future, beyond all data)
 # --------------------------------------------------------------------------- #
-def forecast_future(df, feats, horizon, best_iter, out_path):
-    """Refit on all history, then roll forward `horizon` days recursively."""
+def forecast_future(df, feats, horizon, best_iter, out_path, price_calendar=None):
+    """Refit on all history, then roll forward `horizon` days recursively.
+
+    price_calendar (optional): known/planned price+discount rows for dates
+    within the forward horizon, same shape backtest_period() already builds
+    for its own known-prices mode (KEY + ship_day + avg_our_price/
+    avg_discount_amt). Without it, recursive_forecast() carries the last
+    historical value forward flat for the whole horizon.
+    """
     train_full = df.dropna(subset=[f"lag_{max(LAGS)}"])
     model = train_lgb(train_full, feats, valid_df=None,
                       num_boost_round=max(best_iter, 200))
     last_day = df[DATE].max()
     fc = recursive_forecast(model, df, feats,
                             last_day + pd.Timedelta(days=1),
-                            last_day + pd.Timedelta(days=horizon), best_iter)
+                            last_day + pd.Timedelta(days=horizon), best_iter,
+                            price_calendar=price_calendar)
     fc = fc.sort_values(KEY + [DATE])
     fc["forecast_units"] = fc["forecast_units"].round(2)
     fc.to_csv(out_path, sep="\t", index=False)
@@ -746,6 +754,11 @@ def main():
     ap.add_argument("--weather", default=None,
                     help="Path to weather TSV (postal_code, ship_day, temp_*, precip_mm, "
                          "is_hot, is_cold) to add as exogenous signals. See fetch_weather.py.")
+    ap.add_argument("--future-prices", default=None,
+                    help="Path to a TSV of known/planned price+discount rows for dates within "
+                         "the --forecast-future horizon (ASIN/asin, postal_code, ship_day, and "
+                         "avg_our_price and/or avg_discount_amt). Without this, the forward "
+                         "forecast carries the last historical price/discount forward flat.")
     ap.add_argument("--weights", action="store_true",
                     help="Enable volume sample-weighting during training "
                          "(off by default; regressed WAPE on this data).")
@@ -819,8 +832,27 @@ def main():
         best_iter = backtest_trailing(feat_df, feats, args.backtest_days)
 
     if args.forecast_future or not args.train_end:
+        future_price_cal = None
+        if args.future_prices:
+            future_price_cal = pd.read_csv(args.future_prices, sep="\t",
+                                           dtype={"asin": "string", "postal_code": "string",
+                                                  "ASIN": "string"})
+            future_price_cal.columns = [c.strip() for c in future_price_cal.columns]
+            if "asin" in future_price_cal.columns and "ASIN" not in future_price_cal.columns:
+                future_price_cal = future_price_cal.rename(columns={"asin": "ASIN"})
+            future_price_cal[DATE] = pd.to_datetime(future_price_cal[DATE], errors="coerce").dt.normalize()
+            for c in KEY:
+                future_price_cal[c] = future_price_cal[c].astype("string").str.strip()
+            for c in ("avg_our_price", "avg_discount_amt"):
+                if c in future_price_cal.columns:
+                    future_price_cal[c] = pd.to_numeric(future_price_cal[c], errors="coerce")
+            future_price_cal = future_price_cal.dropna(subset=[DATE] + KEY, how="any")
+            print(f"[future-prices] loaded {len(future_price_cal):,} planned price/discount rows "
+                  f"from {args.future_prices}")
+
         out_path = os.path.join(args.outdir, "forecast_output.tsv")
-        forecast_future(feat_df, feats, args.horizon, best_iter, out_path)
+        forecast_future(feat_df, feats, args.horizon, best_iter, out_path,
+                        price_calendar=future_price_cal)
 
 
 if __name__ == "__main__":
