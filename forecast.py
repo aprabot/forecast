@@ -441,7 +441,8 @@ BUFFER_DAYS = max(LAGS + YEAR_LAGS) + max(ROLL_WINDOWS) + 5  # history for featu
 
 
 def recursive_forecast(model, dense_history, feats, start_day, end_day,
-                       best_iter, future_price=None, price_calendar=None):
+                       best_iter, future_price=None, price_calendar=None,
+                       explain=False):
     """Roll the model forward day-by-day from start_day..end_day inclusive.
 
     Each day's prediction is written back into the history so it feeds the
@@ -449,12 +450,38 @@ def recursive_forecast(model, dense_history, feats, start_day, end_day,
     future actuals are used). Only a trailing BUFFER_DAYS window is retained
     per step for speed, which is sufficient because every feature depends on
     at most ~max(LAGS)+max(ROLL_WINDOWS) prior days.
+
+    explain: if True, also computes LightGBM's exact per-feature contribution
+    to each row's prediction (model.predict(..., pred_contrib=True) — exact
+    for tree ensembles, not an approximation) and keeps the top 5 by absolute
+    contribution per row. Real added per-step cost (roughly doubles each
+    day's predict call), so it's off by default and meant for the forward
+    horizon, not a 365-day backtest.
+
+    IMPORTANT: this model uses objective="tweedie" (log link), so pred_contrib
+    values are additive in LOG-space, not in forecast units — sum(contrib) ==
+    log(raw_prediction), NOT raw_prediction itself (verified: exp(sum(contrib))
+    matches the unclipped raw prediction to float precision). Reporting the raw
+    log-space numbers as if they were unit contributions would be quantitatively
+    wrong (e.g. -1.6 doesn't mean "-1.6 units"). Instead each feature's effect is
+    converted to a multiplicative pct_effect = exp(contribution) - 1, which is
+    exact and composable: raw_prediction == exp(base_value) * prod(1 + pct_effect_j)
+    over ALL features j (not just the persisted top 5) — i.e. "this feature alone
+    scaled the forecast by roughly (1 + pct_effect)x, holding every other factor's
+    effect fixed."
+
+    Returns (forecast_df, explain_dict) — explain_dict is None when
+    explain=False, otherwise {ASIN: {ship_day_str: [{postal_code, units,
+    features: [{feature, pct_effect}, ...top 5 by |log-space contribution|]},
+    ...]}}. `units` is that row's own predicted volume (see note above on
+    why it's needed to aggregate pct_effect across postal codes correctly).
     """
     price_cols = dense_history.attrs.get("price_cols", [])
     weather_cols = dense_history.attrs.get("weather_cols", [])
     exog_cols = price_cols + weather_cols
     origin = dense_history.attrs.get("origin", dense_history[DATE].min())
     keys = dense_history[KEY].drop_duplicates().reset_index(drop=True)
+    explain_out = {} if explain else None
 
     # Seed the working buffer with the tail of real history before start_day.
     buf = dense_history[dense_history[DATE] >= start_day - pd.Timedelta(days=BUFFER_DAYS)].copy()
@@ -499,6 +526,34 @@ def recursive_forecast(model, dense_history, feats, start_day, end_day,
         mask = fe[DATE] == day
         pred = np.clip(model.predict(fe.loc[mask, feats], num_iteration=best_iter), 0, None)
 
+        if explain:
+            # pred_contrib columns are in `feats` order, with one extra final
+            # column (the base/expected value) — exclude it, since we only
+            # want per-feature attribution, not the base itself. These are
+            # additive in LOG-space (tweedie's link function) — see the
+            # docstring for why they're converted to a multiplicative
+            # pct_effect before being persisted, rather than reported raw.
+            contrib = model.predict(fe.loc[mask, feats], num_iteration=best_iter, pred_contrib=True)
+            rows_meta = fe.loc[mask, KEY + [DATE]].reset_index(drop=True)
+            for i in range(contrib.shape[0]):
+                row_contrib = contrib[i, :-1]
+                top_idx = np.argsort(-np.abs(row_contrib))[:5]
+                top = [{"feature": feats[j],
+                        "pct_effect": round(float(np.expm1(row_contrib[j])) * 100, 1)}
+                       for j in top_idx]
+                asin = rows_meta.loc[i, "ASIN"]
+                day_str = rows_meta.loc[i, DATE].strftime("%Y-%m-%d")
+                # units = this row's own predicted volume (postal_code x day),
+                # carried alongside pct_effect so a consumer aggregating
+                # multiple postal codes for the same SKU+day can convert each
+                # ZIP's log-space percentage back to a real unit delta
+                # (units - units / (1 + pct_effect/100)) BEFORE summing —
+                # percentages themselves aren't additive across postal codes
+                # since each ZIP has a different base prediction.
+                explain_out.setdefault(asin, {}).setdefault(day_str, []).append(
+                    {"postal_code": rows_meta.loc[i, "postal_code"],
+                     "units": round(float(pred[i]), 3), "features": top})
+
         # Write prediction back so it feeds future lags.
         buf.loc[buf[DATE] == day, TARGET] = pred
         out = fe.loc[mask, KEY + [DATE]].copy()
@@ -509,7 +564,7 @@ def recursive_forecast(model, dense_history, feats, start_day, end_day,
         buf = buf[buf[DATE] > day - pd.Timedelta(days=BUFFER_DAYS)].copy()
         day += pd.Timedelta(days=1)
 
-    return pd.concat(out_rows, ignore_index=True)
+    return pd.concat(out_rows, ignore_index=True), (explain_out if explain else None)
 
 
 def _metric_table(y_true, preds: dict):
@@ -568,8 +623,8 @@ def backtest_period(df, feats, train_end, out_path, refresh_days=0, known_prices
     if not refresh_days:
         hist = df[df[DATE] <= train_end].copy()
         hist.attrs.update(base_attrs)
-        fc = recursive_forecast(model, hist, feats, test_start, test_end, best_iter,
-                                price_calendar=price_cal)
+        fc, _ = recursive_forecast(model, hist, feats, test_start, test_end, best_iter,
+                                   price_calendar=price_cal)
     else:
         # Walk origins through the test window, re-seeding lags with actuals.
         chunks = []
@@ -579,8 +634,8 @@ def backtest_period(df, feats, train_end, out_path, refresh_days=0, known_prices
             block_end = min(origin + pd.Timedelta(days=refresh_days - 1), test_end)
             seed = df[df[DATE] < origin].copy()      # ACTUALS up to this origin
             seed.attrs.update(base_attrs)
-            bf = recursive_forecast(model, seed, feats, origin, block_end,
-                                    best_iter, price_calendar=price_cal)
+            bf, _ = recursive_forecast(model, seed, feats, origin, block_end,
+                                       best_iter, price_calendar=price_cal)
             raw_sum = float(bf["forecast_units"].sum())
             # Rolling calibration: scale by the bias seen on already-realized
             # blocks only (leakage-free — uses past actuals, like real ops).
@@ -669,6 +724,11 @@ def backtest_period(df, feats, train_end, out_path, refresh_days=0, known_prices
         "calibrate": bool(calibrate),
         "price_cols": price_cols,
         "weather_cols": weather_cols,
+        # Lets a later --forecast-future-only invocation (e.g. a dedicated
+        # --explain pass) pass --best-iter <this value> to reuse the same
+        # refit-on-all-data model this run already produced, instead of
+        # deriving its own (possibly slightly different) best_iter.
+        "best_iter": int(best_iter),
     }
     with open(meta_path, "w") as fh:
         json.dump(meta, fh, indent=2)
@@ -698,7 +758,8 @@ def backtest_trailing(df, feats, backtest_days):
 # --------------------------------------------------------------------------- #
 # 6. Recursive forward forecast (future, beyond all data)
 # --------------------------------------------------------------------------- #
-def forecast_future(df, feats, horizon, best_iter, out_path, price_calendar=None):
+def forecast_future(df, feats, horizon, best_iter, out_path, price_calendar=None,
+                    explain=False, explain_path=None):
     """Refit on all history, then roll forward `horizon` days recursively.
 
     price_calendar (optional): known/planned price+discount rows for dates
@@ -706,20 +767,32 @@ def forecast_future(df, feats, horizon, best_iter, out_path, price_calendar=None
     for its own known-prices mode (KEY + ship_day + avg_our_price/
     avg_discount_amt). Without it, recursive_forecast() carries the last
     historical value forward flat for the whole horizon.
+
+    explain (optional): also compute and write real per-feature contribution
+    data (top 5 per SKU x postal_code x day) to explain_path — see
+    recursive_forecast()'s own docstring. Deliberately only offered here,
+    not in backtest_period(): a year of backtest days at full catalog scale
+    would multiply the already-real cost of this by ~10x for no proven need.
     """
     train_full = df.dropna(subset=[f"lag_{max(LAGS)}"])
     model = train_lgb(train_full, feats, valid_df=None,
                       num_boost_round=max(best_iter, 200))
     last_day = df[DATE].max()
-    fc = recursive_forecast(model, df, feats,
+    fc, explain_data = recursive_forecast(model, df, feats,
                             last_day + pd.Timedelta(days=1),
                             last_day + pd.Timedelta(days=horizon), best_iter,
-                            price_calendar=price_calendar)
+                            price_calendar=price_calendar, explain=explain)
     fc = fc.sort_values(KEY + [DATE])
     fc["forecast_units"] = fc["forecast_units"].round(2)
     fc.to_csv(out_path, sep="\t", index=False)
     print(f"\n[forecast] wrote {len(fc):,} rows ({horizon} days x "
           f"{df[KEY].drop_duplicates().shape[0]} series) -> {out_path}")
+    if explain and explain_data is not None:
+        ep = explain_path or (os.path.join(os.path.dirname(out_path), "forecast_explain.json")
+                               if os.path.dirname(out_path) else "forecast_explain.json")
+        with open(ep, "w") as fh:
+            json.dump(explain_data, fh)
+        print(f"[forecast] wrote per-day explainability -> {ep}")
     print("\nForecast sample:")
     print(fc.head(10).to_string(index=False))
     return fc
@@ -769,6 +842,23 @@ def main():
                     help="Rolling leakage-free bias correction: scale each "
                          "refresh block by the actual/forecast ratio of "
                          "already-realized blocks. Removes systematic volume bias.")
+    ap.add_argument("--explain", action="store_true",
+                    help="Also compute real per-feature contributions (LightGBM "
+                         "pred_contrib, exact for tree ensembles) for each day of "
+                         "the --forecast-future horizon, top 5 by |contribution| "
+                         "per SKU x postal_code x day. Written to "
+                         "forecast_explain.json alongside the forecast output. "
+                         "Off by default — real added cost, and only applies to "
+                         "the forward horizon, not the backtest.")
+    ap.add_argument("--best-iter", type=int, default=None,
+                    help="Skip backtesting (both --train-end and the trailing "
+                         "default) and use this exact boosting-round count. For "
+                         "a fast --forecast-future-only run (e.g. a dedicated "
+                         "--explain pass) that reuses a prior run's best_iter "
+                         "(see backtest_2025.meta.json's \"best_iter\" field) so "
+                         "the refit-on-all-data model matches what that prior "
+                         "run already produced, instead of drifting from an "
+                         "independently-recomputed best_iter.")
     args = ap.parse_args()
 
     global USE_WEIGHTS, USE_MONOTONE
@@ -822,7 +912,10 @@ def main():
     feats = feature_columns(feat_df)
     print(f"[features] {len(feats)} features: {feats}")
 
-    if args.train_end:
+    if args.best_iter is not None:
+        best_iter = args.best_iter
+        print(f"[config] skipping backtest — using given --best-iter {best_iter}")
+    elif args.train_end:
         bt_path = os.path.join(args.outdir, "backtest_2025.tsv")
         best_iter = backtest_period(feat_df, feats, args.train_end, bt_path,
                                     refresh_days=args.refresh_days,
@@ -852,7 +945,7 @@ def main():
 
         out_path = os.path.join(args.outdir, "forecast_output.tsv")
         forecast_future(feat_df, feats, args.horizon, best_iter, out_path,
-                        price_calendar=future_price_cal)
+                        price_calendar=future_price_cal, explain=args.explain)
 
 
 if __name__ == "__main__":
