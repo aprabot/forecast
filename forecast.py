@@ -439,10 +439,40 @@ def train_lgb(train_df, feats, valid_df=None, num_boost_round=1500):
 
 BUFFER_DAYS = max(LAGS + YEAR_LAGS) + max(ROLL_WINDOWS) + 5  # history for features
 
+# forecast_future()'s calibration curve: a real, uninterrupted 365-day
+# forward forecast has no future actuals to periodically reseed lags with
+# (unlike backtest_period()'s --refresh-days mode), so the model's short-
+# term lag_*/roll_* features become entirely self-referential after ~28-56
+# days and settle into a persistently-biased-low equilibrium — the model's
+# feature importance is dominated by those short-term features, not the
+# YEAR_LAGS features meant to carry YoY growth forward, so growth visible
+# in the actuals largely doesn't make it into the forward forecast.
+#
+# Measured directly (2026-09-04) by truncating With_Price.tsv to
+# 2024-12-31 and calling forecast_future() for the next 365 days — i.e.
+# reproducing forecast_future()'s exact handicap (trained on everything
+# available, no future price/weather calendar, single uninterrupted
+# recursive walk) — then scoring that forecast against the real, known
+# 2025 actuals it never saw. Result (month of horizon -> actual/forecast):
+# month 1 needed the least correction (+24%), growing to a plateau around
+# +55-65% by months 6-12. These are MONTHLY buckets, not a smoothed daily
+# curve, because the raw day-level actual/forecast ratio is far too noisy
+# (217 heterogeneous, sometimes-lumpy series x lands-on-a-given-day) for a
+# per-day lookup to be anything but overfit to that noise.
+#
+# Only valid for the "no real future exogenous data" case this was measured
+# under — see forecast_future()'s own calibrate handling for why it's
+# skipped whenever a real --future-prices calendar is supplied instead.
+# Re-measure periodically as the underlying data/features drift (rerun the
+# same truncate-and-score methodology) rather than assuming this stays
+# accurate indefinitely.
+MONTHLY_BIAS_CURVE = [1.239, 1.306, 1.316, 1.346, 1.479,
+                      1.553, 1.567, 1.486, 1.499, 1.550, 1.629, 1.623]
+
 
 def recursive_forecast(model, dense_history, feats, start_day, end_day,
                        best_iter, future_price=None, price_calendar=None,
-                       explain=False):
+                       explain=False, calibrate_factor=1.0):
     """Roll the model forward day-by-day from start_day..end_day inclusive.
 
     Each day's prediction is written back into the history so it feeds the
@@ -450,6 +480,29 @@ def recursive_forecast(model, dense_history, feats, start_day, end_day,
     future actuals are used). Only a trailing BUFFER_DAYS window is retained
     per step for speed, which is sufficient because every feature depends on
     at most ~max(LAGS)+max(ROLL_WINDOWS) prior days.
+
+    calibrate_factor: a multiplicative bias correction applied ONLY to the
+    returned/reported forecast_units — never to what's written back into
+    the buffer, which stays the model's raw, uncorrected prediction. Either
+    a single float (flat correction for the whole call) or a sequence
+    indexed by day-offset-from-start_day (0-based; an index past the end of
+    the sequence reuses its last value), for a horizon-dependent correction
+    like forecast_future()'s own calibration curve.
+
+    IMPORTANT: this must NOT be applied before the buf write-back. Tried
+    that first (2026-09-04) reasoning it would also fix the compounding
+    decay at its source, not just cosmetically rescale the output — instead
+    it created a WORSE, opposite compounding problem: day N's inflated
+    prediction becomes day N+1's dominant lag_1 feature, so day N+1 already
+    predicts higher before its own factor is even applied, then gets
+    multiplied again on top of that — a sustained >1 factor compounds like
+    daily interest across the whole walk (a ~1.2-1.6x monthly factor this
+    way produced +18% by month 1 growing to +103% by month 12). Output-only
+    calibration matches how backtest_period()'s own calibration already
+    works safely (it scales the completed block's output column, never
+    feeds back into that block's own buffer) and matches how
+    MONTHLY_BIAS_CURVE was actually measured (comparing raw model OUTPUT
+    against real actuals, not a self-correcting walk).
 
     explain: if True, also computes LightGBM's exact per-feature contribution
     to each row's prediction (model.predict(..., pred_contrib=True) — exact
@@ -498,8 +551,17 @@ def recursive_forecast(model, dense_history, feats, start_day, end_day,
         price_by_day = {ts: sub[KEY + cal_cols]
                         for ts, sub in price_calendar.groupby(DATE)}
 
+    # calibrate_factor may be a flat float or a per-horizon-day sequence
+    # (see docstring) — normalize lookup into one closure either way.
+    if isinstance(calibrate_factor, (int, float)):
+        _cal_factor_for = lambda day_idx: calibrate_factor
+    else:
+        _cal_curve = calibrate_factor
+        _cal_factor_for = lambda day_idx: _cal_curve[min(day_idx, len(_cal_curve) - 1)]
+
     out_rows = []
     day = start_day
+    day_idx = 0
     while day <= end_day:
         block = keys.copy()
         block[DATE] = day
@@ -524,7 +586,20 @@ def recursive_forecast(model, dense_history, feats, start_day, end_day,
 
         fe = add_features(buf)
         mask = fe[DATE] == day
+        # pred stays RAW (uncalibrated) — it's what gets written back into
+        # buf below to feed subsequent days' lag_*/roll_* features, and it
+        # must stay genuine model output for that. A day_factor != 1.0
+        # applied here compounds: day N's inflated pred becomes day N+1's
+        # dominant lag_1 feature, day N+1 predicts higher BEFORE its own
+        # factor is even applied, then gets multiplied again — a sustained
+        # >1 (or <1) factor compounds like daily interest across the whole
+        # walk (confirmed 2026-09-04: a ~1.2-1.6x monthly factor applied
+        # this way produced +18% by month 1 growing to +103% by month 12,
+        # nowhere near the intended correction). The reported value is
+        # calibrated separately, below, from this same raw pred.
         pred = np.clip(model.predict(fe.loc[mask, feats], num_iteration=best_iter), 0, None)
+        day_factor = _cal_factor_for(day_idx)
+        reported_pred = pred * day_factor if day_factor != 1.0 else pred
 
         if explain:
             # pred_contrib columns are in `feats` order, with one extra final
@@ -554,15 +629,18 @@ def recursive_forecast(model, dense_history, feats, start_day, end_day,
                     {"postal_code": rows_meta.loc[i, "postal_code"],
                      "units": round(float(pred[i]), 3), "features": top})
 
-        # Write prediction back so it feeds future lags.
+        # Write the RAW prediction back so it feeds future lags — see the
+        # comment above pred's computation for why this must not be the
+        # calibrated value.
         buf.loc[buf[DATE] == day, TARGET] = pred
         out = fe.loc[mask, KEY + [DATE]].copy()
-        out["forecast_units"] = pred
+        out["forecast_units"] = reported_pred
         out_rows.append(out)
 
         # Trim buffer to a trailing window to keep each step cheap.
         buf = buf[buf[DATE] > day - pd.Timedelta(days=BUFFER_DAYS)].copy()
         day += pd.Timedelta(days=1)
+        day_idx += 1
 
     return pd.concat(out_rows, ignore_index=True), (explain_out if explain else None)
 
@@ -759,7 +837,7 @@ def backtest_trailing(df, feats, backtest_days):
 # 6. Recursive forward forecast (future, beyond all data)
 # --------------------------------------------------------------------------- #
 def forecast_future(df, feats, horizon, best_iter, out_path, price_calendar=None,
-                    explain=False, explain_path=None):
+                    explain=False, explain_path=None, calibrate=False):
     """Refit on all history, then roll forward `horizon` days recursively.
 
     price_calendar (optional): known/planned price+discount rows for dates
@@ -773,15 +851,38 @@ def forecast_future(df, feats, horizon, best_iter, out_path, price_calendar=None
     recursive_forecast()'s own docstring. Deliberately only offered here,
     not in backtest_period(): a year of backtest days at full catalog scale
     would multiply the already-real cost of this by ~10x for no proven need.
+
+    calibrate (optional): apply MONTHLY_BIAS_CURVE (see its own module-level
+    docstring for what it corrects and how it was measured) to every day of
+    this call's recursive walk, indexed by month-of-horizon. Skipped even
+    when True if price_calendar is given — a real future price/discount
+    plan changes the model's information enough that the curve (measured
+    with no such plan) no longer applies; use it un-recalibrated in that
+    case rather than apply a correction measured for a different situation.
     """
     train_full = df.dropna(subset=[f"lag_{max(LAGS)}"])
     model = train_lgb(train_full, feats, valid_df=None,
                       num_boost_round=max(best_iter, 200))
     last_day = df[DATE].max()
+
+    calibrate_factor = 1.0
+    if calibrate and price_calendar is None:
+        # One MONTHLY_BIAS_CURVE value per ~30-day bucket of the horizon,
+        # reused (via recursive_forecast()'s "past the end" clamp) for any
+        # day beyond the last bucket.
+        calibrate_factor = [MONTHLY_BIAS_CURVE[min(d // 30, len(MONTHLY_BIAS_CURVE) - 1)]
+                            for d in range(horizon)]
+        print(f"[forecast] applying MONTHLY_BIAS_CURVE ({calibrate_factor[0]:.3f} -> "
+              f"{calibrate_factor[-1]:.3f} over the horizon) to the forward forecast")
+    elif calibrate and price_calendar is not None:
+        print("[forecast] --calibrate requested but a --future-prices calendar was "
+              "supplied — skipping MONTHLY_BIAS_CURVE (measured without one, doesn't apply here)")
+
     fc, explain_data = recursive_forecast(model, df, feats,
                             last_day + pd.Timedelta(days=1),
                             last_day + pd.Timedelta(days=horizon), best_iter,
-                            price_calendar=price_calendar, explain=explain)
+                            price_calendar=price_calendar, explain=explain,
+                            calibrate_factor=calibrate_factor)
     fc = fc.sort_values(KEY + [DATE])
     fc["forecast_units"] = fc["forecast_units"].round(2)
     fc.to_csv(out_path, sep="\t", index=False)
@@ -945,7 +1046,8 @@ def main():
 
         out_path = os.path.join(args.outdir, "forecast_output.tsv")
         forecast_future(feat_df, feats, args.horizon, best_iter, out_path,
-                        price_calendar=future_price_cal, explain=args.explain)
+                        price_calendar=future_price_cal, explain=args.explain,
+                        calibrate=args.calibrate)
 
 
 if __name__ == "__main__":
