@@ -79,6 +79,24 @@ PEAK_COLS = ["burstiness", "discount_frac", "discount_vs_tr28", "deep_promo",
 # --------------------------------------------------------------------------- #
 # 1. Load & aggregate
 # --------------------------------------------------------------------------- #
+def load_ad_spend_calendar(path: str) -> pd.DataFrame:
+    """Parses a --ad-spend TSV (ASIN/asin, postal_code, ship_day, ad_spend_yen)
+    — same column-normalization as the --future-prices loader in main(), kept
+    as its own function since this file is read twice (once to merge into the
+    historical training frame as a real feature, once as part of the forward
+    price_calendar for the recursive forecast)."""
+    adx = pd.read_csv(path, sep="\t", dtype={"asin": "string", "postal_code": "string", "ASIN": "string"})
+    adx.columns = [c.strip() for c in adx.columns]
+    if "asin" in adx.columns and "ASIN" not in adx.columns:
+        adx = adx.rename(columns={"asin": "ASIN"})
+    adx[DATE] = pd.to_datetime(adx["ship_day"], errors="coerce").dt.normalize()
+    for c in KEY:
+        adx[c] = adx[c].astype("string").str.strip()
+    adx["ad_spend_yen"] = pd.to_numeric(adx["ad_spend_yen"], errors="coerce")
+    adx = adx.dropna(subset=[DATE] + KEY + ["ad_spend_yen"])
+    return adx[KEY + [DATE, "ad_spend_yen"]]
+
+
 def load_and_aggregate(input_path: str, use_price: bool) -> pd.DataFrame:
     """Read shipment-level TSV and aggregate to ASIN x postal_code x day.
 
@@ -960,6 +978,20 @@ def main():
                          "the refit-on-all-data model matches what that prior "
                          "run already produced, instead of drifting from an "
                          "independently-recomputed best_iter.")
+    ap.add_argument("--ad-spend", default=None,
+                    help="Path to a TSV of ad spend rows (ASIN/asin, postal_code, "
+                         "ship_day, ad_spend_yen) — Amplify's real-money feedback "
+                         "loop: ad spend becomes a known covariate the model trains "
+                         "on and conditions the forward forecast on, the same "
+                         "mechanism --future-prices already uses for planned price/ "
+                         "discount (this merges rows for both historical AND forward "
+                         "dates from the same file; historical rows with no match "
+                         "get ad_spend_yen=0). Off by default: there is currently "
+                         "ZERO historical ad-spend data (Amplify is brand new), so "
+                         "the model can train with this but cannot yet learn a real "
+                         "ad-spend effect — whether this feature should be default-on "
+                         "is a dedicated future validation step once real campaign "
+                         "history accumulates, same as --weights/--monotone's history.")
     args = ap.parse_args()
 
     global USE_WEIGHTS, USE_MONOTONE
@@ -1005,6 +1037,32 @@ def main():
         print(f"[weather] merged {len(weather_cols)} signals "
               f"({weather_cols}); {miss:.1f}% rows missing weather")
 
+    # Merge ad spend (exogenous, known by ASIN x postal_code x day) if
+    # provided — opt-in, reuses the exact same "exogenous calendar merged
+    # onto dense, becomes a real feature via price_cols" mechanism as
+    # weather/price above (feature_columns() just unions price_cols +
+    # weather_cols, so appending here is the only change needed — no new
+    # plumbing in feature_columns() or recursive_forecast()'s calendar
+    # threading). See the --ad-spend argparse help for why this is
+    # deliberately opt-in: there is currently ZERO historical ad-spend data
+    # (Amplify is brand new), so every historical row's left-join miss
+    # fills to 0 below — real, not missing, but with no variation for the
+    # model to learn a genuine ad-spend effect from yet.
+    ad_spend_cal = None
+    if args.ad_spend:
+        ad_spend_cal = load_ad_spend_calendar(args.ad_spend)
+        price_cols_saved = dense.attrs.get("price_cols", [])
+        weather_cols_saved = weather_cols
+        origin_saved = dense.attrs.get("origin", dense[DATE].min())
+        dense = dense.merge(ad_spend_cal, on=KEY + [DATE], how="left")
+        dense["ad_spend_yen"] = dense["ad_spend_yen"].fillna(0.0)
+        dense.attrs["price_cols"] = price_cols_saved + ["ad_spend_yen"]
+        dense.attrs["weather_cols"] = weather_cols_saved
+        dense.attrs["origin"] = origin_saved
+        nonzero = int((dense["ad_spend_yen"] > 0).sum())
+        print(f"[ad-spend] merged ad_spend_yen ({nonzero:,}/{len(dense):,} rows non-zero) "
+              f"from {args.ad_spend}")
+
     feat_df = add_features(dense)
     # Preserve metadata that pandas drops across operations.
     feat_df.attrs["price_cols"] = dense.attrs.get("price_cols", [])
@@ -1043,6 +1101,17 @@ def main():
             future_price_cal = future_price_cal.dropna(subset=[DATE] + KEY, how="any")
             print(f"[future-prices] loaded {len(future_price_cal):,} planned price/discount rows "
                   f"from {args.future_prices}")
+
+        # Same calendar already parsed above for the historical merge — reused
+        # here (not reparsed) as the forward-looking half of the ad-spend
+        # feedback loop, via the SAME price_calendar mechanism --future-prices
+        # uses (recursive_forecast() only cares that the column is in
+        # exog_cols, confirmed covariate-agnostic — never price-specific).
+        if ad_spend_cal is not None:
+            if future_price_cal is None:
+                future_price_cal = ad_spend_cal
+            else:
+                future_price_cal = future_price_cal.merge(ad_spend_cal, on=KEY + [DATE], how="outer")
 
         out_path = os.path.join(args.outdir, "forecast_output.tsv")
         forecast_future(feat_df, feats, args.horizon, best_iter, out_path,
